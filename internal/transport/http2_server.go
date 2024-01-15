@@ -140,6 +140,7 @@ type http2Server struct {
 // underlying conn gets closed before the client preface could be read, it
 // returns a nil transport and a nil error.
 func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport, err error) {
+	fmt.Println("[rinfx] internal/transport/http2_server.go: NewServerTransport")
 	var authInfo credentials.AuthInfo
 	rawConn := conn
 	if config.Credentials != nil {
@@ -608,6 +609,7 @@ func (t *http2Server) operateHeaders(ctx context.Context, frame *http2.MetaHeade
 // typically run in a separate goroutine.
 // traceCtx attaches trace to ctx and returns the new context.
 func (t *http2Server) HandleStreams(ctx context.Context, handle func(*Stream)) {
+	fmt.Println("[rinfx] internal/transport/http2_server.go: HandleStreams")
 	defer func() {
 		<-t.loopyWriterDone
 		close(t.readerDone)
@@ -645,23 +647,31 @@ func (t *http2Server) HandleStreams(ctx context.Context, handle func(*Stream)) {
 		}
 		switch frame := frame.(type) {
 		case *http2.MetaHeadersFrame:
+			fmt.Println("[rinfx] internal/transport/http2_server.go: HandleStreams, receive http2.MetaHeadersFrame")
 			if err := t.operateHeaders(ctx, frame, handle); err != nil {
 				t.Close(err)
 				break
 			}
 		case *http2.DataFrame:
+			fmt.Println("[rinfx] internal/transport/http2_server.go: HandleStreams, receive http2.DataFrame")
 			t.handleData(frame)
 		case *http2.RSTStreamFrame:
+			fmt.Println("[rinfx] internal/transport/http2_server.go: HandleStreams, receive http2.RSTStreamFrame")
 			t.handleRSTStream(frame)
 		case *http2.SettingsFrame:
+			fmt.Println("[rinfx] internal/transport/http2_server.go: HandleStreams, receive http2.SettingsFrame")
 			t.handleSettings(frame)
 		case *http2.PingFrame:
+			fmt.Println("[rinfx] internal/transport/http2_server.go: HandleStreams, receive http2.PingFrame")
 			t.handlePing(frame)
 		case *http2.WindowUpdateFrame:
+			fmt.Println("[rinfx] internal/transport/http2_server.go: HandleStreams, receive http2.WindowUpdateFrame")
 			t.handleWindowUpdate(frame)
 		case *http2.GoAwayFrame:
+			fmt.Println("[rinfx] internal/transport/http2_server.go: HandleStreams, receive http2.GoAwayFrame")
 			// TODO: Handle GoAway from the client appropriately.
 		default:
+			fmt.Println("[rinfx] internal/transport/http2_server.go: HandleStreams, default")
 			if t.logger.V(logLevel) {
 				t.logger.Infof("Received unsupported frame type %T", frame)
 			}
@@ -764,14 +774,17 @@ func (t *http2Server) handleData(f *http2.DataFrame) {
 	// Select the right stream to dispatch.
 	s, ok := t.getStream(f)
 	if !ok {
+		fmt.Println("[rinfx] internal/transport/http2_server.go: handleData > get stream error, return")
 		return
 	}
 	if s.getState() == streamReadDone {
+		fmt.Println("[rinfx] internal/transport/http2_server.go: handleData > stream state is streamReadDone, return")
 		t.closeStream(s, true, http2.ErrCodeStreamClosed, false)
 		return
 	}
 	if size > 0 {
 		if err := s.fc.onData(size); err != nil {
+			fmt.Println("[rinfx] internal/transport/http2_server.go: handleData > read data error, return")
 			t.closeStream(s, true, http2.ErrCodeFlowControl, false)
 			return
 		}
@@ -788,12 +801,17 @@ func (t *http2Server) handleData(f *http2.DataFrame) {
 			buffer.Reset()
 			buffer.Write(f.Data())
 			s.write(recvMsg{buffer: buffer})
+			s.write(recvMsg{err: io.EOF})
+			//s.compareAndSwapState(streamActive, streamReadDone)
+			//s.write(recvMsg{err: io.EOF})
+			fmt.Printf("[rinfx] internal/transport/http2_server.go: handleData > read data, current state is: %d\n", s.state)
 		}
 	}
 	if f.StreamEnded() {
 		// Received the end of stream from the client.
 		s.compareAndSwapState(streamActive, streamReadDone)
 		s.write(recvMsg{err: io.EOF})
+		fmt.Printf("[rinfx] internal/transport/http2_server.go: handleData > stream is end, current state is: %d\n", s.state)
 	}
 }
 
@@ -960,12 +978,7 @@ func (t *http2Server) WriteHeader(s *Stream, md metadata.MD) error {
 		}
 	}
 	if err := t.writeHeaderLocked(s); err != nil {
-		switch e := err.(type) {
-		case ConnectionError:
-			return status.Error(codes.Unavailable, e.Desc)
-		default:
-			return status.Convert(err).Err()
-		}
+		return status.Convert(err).Err()
 	}
 	return nil
 }
@@ -1068,6 +1081,7 @@ func (t *http2Server) WriteStatus(s *Stream, st *status.Status) error {
 		return ErrHeaderListSizeLimitViolation
 	}
 	// Send a RST_STREAM after the trailers if the client has not already half-closed.
+	fmt.Println("[rinfx] internal/transport/http2_server.go: WriteStatus > call finishStream")
 	rst := s.getState() == streamActive
 	t.finishStream(s, rst, http2.ErrCodeNo, trailingHeader, true)
 	for _, sh := range t.stats {
@@ -1090,6 +1104,7 @@ func (t *http2Server) Write(s *Stream, hdr []byte, data []byte, opts *Options) e
 	} else {
 		// Writing headers checks for this condition.
 		if s.getState() == streamDone {
+			fmt.Println("[rinfx] internal/transport/http2_server.go: Write > streamDone")
 			return t.streamContextErr(s)
 		}
 	}
@@ -1099,6 +1114,7 @@ func (t *http2Server) Write(s *Stream, hdr []byte, data []byte, opts *Options) e
 		d:           data,
 		onEachWrite: t.setResetPingStrikes,
 	}
+	fmt.Println(df)
 	if err := s.wq.get(int32(len(hdr) + len(data))); err != nil {
 		return t.streamContextErr(s)
 	}
@@ -1256,6 +1272,7 @@ func (t *http2Server) finishStream(s *Stream, rst bool, rstCode http2.ErrCode, h
 	// In case stream sending and receiving are invoked in separate
 	// goroutines (e.g., bi-directional streaming), cancel needs to be
 	// called to interrupt the potential blocking on other goroutines.
+	fmt.Println("[rinfx]  internal/transport/http2_server.go: finishStream > call cancel, send RST_STREAM")
 	s.cancel()
 
 	oldState := s.swapState(streamDone)
@@ -1277,6 +1294,7 @@ func (t *http2Server) finishStream(s *Stream, rst bool, rstCode http2.ErrCode, h
 
 // closeStream clears the footprint of a stream when the stream is not needed any more.
 func (t *http2Server) closeStream(s *Stream, rst bool, rstCode http2.ErrCode, eosReceived bool) {
+	fmt.Println("[rinfx] internal/transport/http2_server.go: closeStream")
 	// In case stream sending and receiving are invoked in separate
 	// goroutines (e.g., bi-directional streaming), cancel needs to be
 	// called to interrupt the potential blocking on other goroutines.

@@ -635,6 +635,7 @@ func (s *Server) initServerWorkers() {
 // NewServer creates a gRPC server which has no service registered and has not
 // started to accept requests yet.
 func NewServer(opt ...ServerOption) *Server {
+	fmt.Println("[rinfx] server.go: NewServer")
 	opts := defaultServerOptions
 	for _, o := range globalServerOptions {
 		o.apply(&opts)
@@ -953,6 +954,7 @@ func (s *Server) drainServerTransports(addr string) {
 // newHTTP2Transport sets up a http/2 transport (using the
 // gRPC http2 server transport in transport/http2_server.go).
 func (s *Server) newHTTP2Transport(c net.Conn) transport.ServerTransport {
+	fmt.Println("[rinfx] server.go: newHTTP2Transport")
 	config := &transport.ServerConfig{
 		MaxStreams:            s.opts.maxConcurrentStreams,
 		ConnectionTimeout:     s.opts.connectionTimeout,
@@ -991,6 +993,7 @@ func (s *Server) newHTTP2Transport(c net.Conn) transport.ServerTransport {
 }
 
 func (s *Server) serveStreams(ctx context.Context, st transport.ServerTransport, rawConn net.Conn) {
+	fmt.Println("[rinfx] server.go: serveStreams")
 	ctx = transport.SetConnection(ctx, rawConn)
 	ctx = peer.NewContext(ctx, st.Peer())
 	for _, sh := range s.opts.statsHandlers {
@@ -1009,6 +1012,7 @@ func (s *Server) serveStreams(ctx context.Context, st transport.ServerTransport,
 	}()
 
 	streamQuota := newHandlerQuota(s.opts.maxConcurrentStreams)
+	fmt.Println("[rinfx] server.go: register HandleStreams")
 	st.HandleStreams(ctx, func(stream *transport.Stream) {
 		streamQuota.acquire()
 		f := func() {
@@ -1133,6 +1137,7 @@ func (s *Server) incrCallsFailed() {
 }
 
 func (s *Server) sendResponse(ctx context.Context, t transport.ServerTransport, stream *transport.Stream, msg any, cp Compressor, opts *transport.Options, comp encoding.Compressor) error {
+	fmt.Println("[rinfx] server.go: sendResponse")
 	data, err := encode(s.getCodec(stream.ContentSubtype()), msg)
 	if err != nil {
 		channelz.Error(logger, s.channelzID, "grpc: server failed to encode response: ", err)
@@ -1331,6 +1336,7 @@ func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTranspor
 	if len(shs) != 0 || len(binlogs) != 0 {
 		payInfo = &payloadInfo{}
 	}
+	// [rinfx] here decompress data
 	d, err := recvAndDecompress(&parser{r: stream, recvBufferPool: s.opts.recvBufferPool}, stream, dc, s.opts.maxReceiveMessageSize, payInfo, decomp)
 	if err != nil {
 		if e := t.WriteStatus(stream, status.Convert(err)); e != nil {
@@ -1342,9 +1348,11 @@ func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTranspor
 		t.IncrMsgRecv()
 	}
 	df := func(v any) error {
+		fmt.Printf("[rinfx] Codec Data are: (size = %d) ", len(d))
 		if err := s.getCodec(stream.ContentSubtype()).Unmarshal(d, v); err != nil {
 			return status.Errorf(codes.Internal, "grpc: error unmarshalling request: %v", err)
 		}
+		fmt.Println(d)
 		for _, sh := range shs {
 			sh.HandleRPC(ctx, &stats.InPayload{
 				RecvTime:         time.Now(),
@@ -1369,7 +1377,9 @@ func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTranspor
 		return nil
 	}
 	ctx = NewContextWithServerTransportStream(ctx, stream)
+	fmt.Println("[rinfx] server.go: processUnaryRPC > start call user-defined handler")
 	reply, appErr := md.Handler(info.serviceImpl, ctx, df, s.opts.unaryInt)
+	fmt.Println("[rinfx] server.go: processUnaryRPC > end call user-defined handler")
 	if appErr != nil {
 		appStatus, ok := status.FromError(appErr)
 		if !ok {
@@ -1418,6 +1428,7 @@ func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTranspor
 	}
 	if err := s.sendResponse(ctx, t, stream, reply, cp, opts, comp); err != nil {
 		if err == io.EOF {
+			fmt.Println("[rinfx] server.go: processUnaryRPC > sendResponse io.EOF error")
 			// The entire stream is done (for unary RPC only).
 			return err
 		}
@@ -1480,6 +1491,7 @@ func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTranspor
 			binlog.Log(ctx, st)
 		}
 	}
+	fmt.Println("[rinfx] server.go: processUnaryRPC > call WriteStatus to terminate stream")
 	return t.WriteStatus(stream, statusOK)
 }
 
@@ -1780,16 +1792,19 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 	srv, knownService := s.services[service]
 	if knownService {
 		if md, ok := srv.methods[method]; ok {
+			fmt.Println("[rinfx] server.go: handleStream > knownService > processUnaryRPC")
 			s.processUnaryRPC(ctx, t, stream, srv, md, ti)
 			return
 		}
 		if sd, ok := srv.streams[method]; ok {
+			fmt.Println("[rinfx] server.go: handleStream > knownService > processStreamingRPC")
 			s.processStreamingRPC(ctx, t, stream, srv, sd, ti)
 			return
 		}
 	}
 	// Unknown service, or known server unknown method.
 	if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
+		fmt.Println("[rinfx] server.go: handleStream > unknownDesc > processStreamingRPC")
 		s.processStreamingRPC(ctx, t, stream, nil, unknownDesc, ti)
 		return
 	}
